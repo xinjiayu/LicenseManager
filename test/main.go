@@ -9,5 +9,5 @@ func main() {
 
 	fmt.Println("test license OK")
 	//======================进行license控制作===========================================
-	LicenseManager.ValidAppLic("appname01", "/Users/microrain/goitem/LicenseManager/test/app.lic")
+	LicenseManager.ValidAppLic("appname01", "app.lic")
 }
