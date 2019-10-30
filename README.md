@@ -1,0 +1,2 @@
+# LicenseManager
+为golang的应用添加简单的license限制
