@@ -24,7 +24,6 @@ type AppLicenseInfo struct {
 
 //EncryptLic 跟据应用信息的配置文件生成license授权文件
 func EncryptLic(appInfoFile, key string) {
-
 	//从文件中读取配置
 	file, err := os.OpenFile(appInfoFile, os.O_RDONLY, 0777)
 	if err != nil {
@@ -38,11 +37,8 @@ func EncryptLic(appInfoFile, key string) {
 	conf := AppLicenseInfo{}
 	if err := json.Unmarshal(contentByte, &conf); err == nil {
 		tmpText := string(contentByte)
-
-		//log.Print("需要加密的信息：",tmpText)
 		//进行加密
 		tmpText = utils.AesEncrypt(tmpText, key)
-		log.Print("====", tmpText)
 
 		//生成license授权文件
 		currentDir, err := filepath.Abs(filepath.Dir(os.Args[0]))
@@ -55,7 +51,6 @@ func EncryptLic(appInfoFile, key string) {
 		dstFile, err := os.Create(lic_file_path)
 		if err != nil {
 			log.Fatal(err)
-			// return 2
 		}
 
 		dstFile.WriteString(tmpText)
@@ -111,6 +106,6 @@ func ValidAppLic(appInfoFile, key string) {
 		}
 
 	} else {
-		fmt.Println(err)
+		log.Fatal(err)
 	}
 }

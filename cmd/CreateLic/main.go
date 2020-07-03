@@ -18,8 +18,7 @@ var (
 func init() {
 	flag.BoolVar(&h, "h", false, "查看帮助信息")
 	flag.StringVar(&f, "f", "", "需要授权的应用信息配置文件，json格式")
-	flag.StringVar(&k, "k", "123456781234567812345678", "授权关键钥匙")
-
+	flag.StringVar(&k, "k", "1234567890123456", "授权钥匙")
 	// 改变默认的 Usage，flag包中的Usage 其实是一个函数类型。这里是覆盖默认函数实现，具体见后面Usage部分的分析
 	flag.Usage = usage
 }
