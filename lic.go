@@ -1,139 +1,116 @@
 package LicenseManager
 
 import (
-	"bytes"
-	"crypto/cipher"
-	"crypto/des"
-	"crypto/md5"
-	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"github.com/denisbrodbeck/machineid"
+	"github.com/xinjiayu/LicenseManager/utils"
 	"io/ioutil"
-	"time"
-
 	"log"
+	"os"
+	"path/filepath"
+	"strconv"
+	"time"
 )
 
-var encryptSalt = "Antell Technolony Co.,Ltd"
-
-//EncryptLic 加密授权信息
-func EncryptLic(licAppName string, date string) string {
-	appNameMd5 := makeMd5(licAppName + encryptSalt)
-	dateEncrypt := desEncrypt([]byte(date), []byte(encryptSalt))
-	dateEncryptHexStr := bytesToHexString(dateEncrypt)
-	md5Check := makeMd5(licAppName + date + appNameMd5 + dateEncryptHexStr + encryptSalt)
-	return licAppName + date + appNameMd5 + dateEncryptHexStr + md5Check
+type AppLicenseInfo struct {
+	AppName        string //应用名称
+	AppCompany     string //应用发布的公司
+	AppUUID        string //此次发布应用的UUID
+	ObjUUID        string //目标设备的UUID
+	AuthorizedName string //授权名称
+	LimitedTime    string //到期日期
 }
 
-//DecryptLic 解密授权信息
-func DecryptLic(licAppName string, lic string) string {
-	if len(lic) <= 88 {
-		log.Fatal(fmt.Sprintf("[L000] 授权无效: %s", lic))
-	}
-	licRunes := []rune(lic)
-	licLen := len(licRunes)
-	if makeMd5(string(licRunes[0:licLen-32])+encryptSalt) != string(licRunes[licLen-32:licLen]) {
-		log.Fatal(fmt.Sprintf("[L001] 授权无效: %s", lic))
-	}
-	encryptDate := licRunes[licLen-48 : licLen-32]
-	decryptDate := string(desDecrypt(hexStringToBytes(string(encryptDate)), []byte(encryptSalt)))
-	if makeMd5(licAppName+encryptSalt) != string(licRunes[licLen-80:licLen-48]) {
-		log.Fatal(fmt.Sprintf("[L002] 授权无效: %s", lic))
-	}
-	if string(licRunes[licLen-88:licLen-80]) != decryptDate {
-		log.Fatal(fmt.Sprintf("[L003] 授权无效: %s", lic))
-	}
-	if string(licRunes[0:licLen-88]) != licAppName {
-		log.Fatal(fmt.Sprintf("[L004] 授权无效: %s", lic))
-	}
-	return decryptDate
-}
+//EncryptLic 跟据应用信息的配置文件生成license授权文件
+func EncryptLic(appInfoFile, key string) {
 
-//ValidAppLic 判断授权文件是否有效
-func ValidAppLic(licAppName string, licFilePath string) {
-	licBytes, err := ioutil.ReadFile(licFilePath)
-	if err != nil {
-		log.Fatal(fmt.Sprintf("[L005] license文件未发现: %s", licFilePath))
-	}
-	licDate := DecryptLic(licAppName, string(licBytes))
-	currentDate := time.Now().Format("20060102")
-	if licDate < currentDate {
-		log.Print("授权结束日期:", licDate)
-		// log.Fatal(fmt.Sprintf("[L006] lic not valid: %s", string(lic_bytes)))
-		log.Fatal("[警告] 授权文件已过期!")
-
-	}
-}
-
-func makeMd5(clearText string) string {
-	h := md5.New()
-	h.Write([]byte(clearText))
-	cipherStr := h.Sum(nil)
-	return hex.EncodeToString(cipherStr)
-}
-
-func desEncrypt(origData []byte, key []byte) []byte {
-	key = makeRightLenDesKey(key)
-	block, err := des.NewCipher(key)
+	//从文件中读取配置
+	file, err := os.OpenFile(appInfoFile, os.O_RDONLY, 0777)
 	if err != nil {
 		panic(err)
 	}
-	blockMode := cipher.NewCBCEncrypter(block, key)
-	crypted := make([]byte, len(origData))
-	blockMode.CryptBlocks(crypted, origData)
-	return crypted
-}
-
-func desDecrypt(crypted []byte, key []byte) []byte {
-	key = makeRightLenDesKey(key)
-	block, err := des.NewCipher(key)
-	if err != nil {
+	defer file.Close()
+	contentByte, err2 := ioutil.ReadAll(file)
+	if err2 != nil {
 		panic(err)
 	}
-	blockMode := cipher.NewCBCDecrypter(block, key)
-	origData := make([]byte, len(crypted))
-	blockMode.CryptBlocks(origData, crypted)
-	return origData
-}
+	conf := AppLicenseInfo{}
+	if err := json.Unmarshal(contentByte, &conf); err == nil {
+		tmpText := string(contentByte)
 
-func makeRightLenDesKey(keyBytes []byte) []byte {
-	var desKeyLen = 8
-	keyBytesLen := len(keyBytes)
-	if keyBytesLen > desKeyLen {
-		keyBytes = keyBytes[0:desKeyLen]
-	} else if keyBytesLen != desKeyLen {
-		keyBytes = append(keyBytes, bytes.Repeat([]byte("0"), desKeyLen-keyBytesLen)...)
-	}
-	return keyBytes
-}
+		//log.Print("需要加密的信息：",tmpText)
+		//进行加密
+		tmpText = utils.AesEncrypt(tmpText, key)
+		log.Print("====", tmpText)
 
-func bytesToHexString(bytesData []byte) string {
-	var buffer bytes.Buffer
-	bytesDataLen := len(bytesData)
-	for i := 0; i < bytesDataLen; i++ {
-		hexStr := fmt.Sprintf("%x", bytesData[i])
-		if len(hexStr) == 1 {
-			buffer.WriteString("0")
+		//生成license授权文件
+		currentDir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+		if err != nil {
+			log.Fatal(err)
 		}
-		buffer.WriteString(hexStr)
+		lic_file_path := currentDir + string(os.PathSeparator) + "app.lic"
+		log.Println(lic_file_path)
+		lic_file_path = "app.lic"
+		dstFile, err := os.Create(lic_file_path)
+		if err != nil {
+			log.Fatal(err)
+			// return 2
+		}
+
+		dstFile.WriteString(tmpText)
+		dstFile.Close()
+	} else {
+		fmt.Println(err)
 	}
-	return buffer.String()
+
 }
 
-func hexStringToBytes(hexStr string) []byte {
-	hexRunes := []rune(hexStr)
-	hexRunesLen := len(hexRunes)
-	var hexBytes = make([]byte, 0)
-	for i := 0; i < hexRunesLen/2; i++ {
-		b := byte(hexDigitRuneToNum(hexRunes[2*i])*16 + hexDigitRuneToNum(hexRunes[2*i+1]))
-		hexBytes = append(hexBytes, b)
+func ValidAppLic(appInfoFile, key string) {
+	file, err := os.OpenFile(appInfoFile, os.O_RDONLY, 0777)
+	if err != nil {
+		panic(err)
 	}
-	return hexBytes
-}
-
-func hexDigitRuneToNum(hexDigitRune rune) int {
-	if hexDigitRune >= rune('a') {
-		return int(hexDigitRune-rune('a')) + 10
+	defer file.Close()
+	contentByte, err2 := ioutil.ReadAll(file)
+	if err2 != nil {
+		panic(err)
 	}
-	return int(hexDigitRune - rune('0'))
 
+	tmpText := string(contentByte)
+
+	//进行解密
+	tmpText = utils.AesDecrypt(tmpText, key)
+	conf := AppLicenseInfo{}
+	if err := json.Unmarshal([]byte(tmpText), &conf); err == nil {
+
+		//获取本机的ID
+		id, err := machineid.ID()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		if conf.ObjUUID != id {
+			fmt.Println("001", "授权失败")
+			os.Exit(0)
+
+		}
+
+		limitedTime := conf.LimitedTime
+
+		if limitedTime != "" {
+			licDate, _ := strconv.Atoi(limitedTime)
+			nowDate := time.Now().Format("20060102")
+			currentDate, _ := strconv.Atoi(nowDate)
+			if licDate < currentDate {
+				log.Print("授权结束日期:", licDate)
+				log.Fatal("[警告] 授权文件已过期!")
+				os.Exit(0)
+
+			}
+		}
+
+	} else {
+		fmt.Println(err)
+	}
 }

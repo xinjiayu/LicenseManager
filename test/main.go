@@ -7,7 +7,9 @@ import (
 
 func main() {
 
-	fmt.Println("test license OK")
 	//======================进行license控制作===========================================
-	LicenseManager.ValidAppLic("appname01", "app.lic")
+	LicenseManager.ValidAppLic("app.lic", "558FEC81051A2020")
+
+	fmt.Println("test license OK")
+
 }
