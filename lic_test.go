@@ -9,27 +9,21 @@ func TestValidAppLic(t *testing.T) {
 
 	licFilePath := "app.lic"
 	lic, err := ValidAppLic(licFilePath, "1234567890123456")
-	if err != nil {
-		t.Log(err.Error())
-	}
 	if lic {
-		fmt.Println("License is valid!")
-	} else {
-		fmt.Println("License is invalid!")
+		if err != nil {
+			fmt.Println(err.Error())
+			return
+		}
+		// 授权成功
+		t.Log("授权有效")
+		return
 	}
-	t.Log("TestValidAppLic OK!")
+	t.Log("授权无效，请联系管理员！")
 }
 
 func TestEncryptLic(t *testing.T) {
-	lic, err := ValidAppLic("app.lic", "1234567890123456")
-	if err != nil {
-		t.Log(err.Error())
-	}
-	if lic {
-		fmt.Println("License is valid!")
-	} else {
-		fmt.Println("License is invalid!")
-	}
-	t.Log(lic)
 
+	licFilePath := "aaa.json"
+	EncryptLic(licFilePath, "1234567890123456")
+	t.Log("success")
 }

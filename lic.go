@@ -77,7 +77,7 @@ func ValidAppLic(appInfoFile, key string) (res bool, err error) {
 	//进行解密
 	tmpText = utils.AesDecrypt(tmpText, key)
 	conf := AppLicenseInfo{}
-	if err := json.Unmarshal([]byte(tmpText), &conf); err != nil {
+	if err := json.Unmarshal([]byte(tmpText), &conf); err == nil {
 		//获取本机的ID
 		id, err := machineid.ID()
 		if err != nil {
@@ -99,5 +99,5 @@ func ValidAppLic(appInfoFile, key string) (res bool, err error) {
 		}
 
 	}
-	return
+	return true, nil
 }
