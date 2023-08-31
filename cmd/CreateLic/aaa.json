@@ -1,9 +1,9 @@
 {
-  "AppName":"LscServer",
-  "AppCompany":"neusoft company",
-  "EncryptSalt":"2342423",
+  "AppName":"SagooAPP",
+  "AppCompany":"Shenyang Sagoo Education Technology Co., Ltd",
+  "EncryptSalt":"afsrewfs2342423",
   "AppUUID":"556677888",
-  "ObjUUID":"DB7074EB-7B7C-592F-823A-558FEC81051A",
-  "AuthorizedName":"东软公司",
-  "LimitedTime":"20221212"
+  "ObjUUID":"BF1E62B3-8FD0-5AC4-8E9E-C3672116EB33",
+  "AuthorizedName":"XXXXX公司",
+  "LimitedTime":"20240101"
 }

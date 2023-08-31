@@ -8,8 +8,17 @@ import (
 func main() {
 
 	//======================进行license控制作===========================================
-	LicenseManager.ValidAppLic("app.lic", "558FEC81051A2020")
+	lic, err := LicenseManager.ValidAppLic("app.lic", "558FEC81051A2020")
+	if lic {
+		if err != nil {
+			fmt.Println(err.Error())
+			return
+		}
+		fmt.Println("License is valid!")
+	}
 
-	fmt.Println("test license OK")
+	if err != nil {
+		fmt.Println(err.Error())
+	}
 
 }
