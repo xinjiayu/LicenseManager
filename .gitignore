@@ -1,0 +1,6 @@
+# 许可证文件与签名密钥不应入库
+*.lic
+*.pem
+
+# 编译产物
+/licensemanager

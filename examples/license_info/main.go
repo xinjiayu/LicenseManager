@@ -11,8 +11,8 @@ import (
 func main() {
 	// 示例1：获取结构化的许可证信息
 	fmt.Println("=== 示例1：获取结构化许可证信息 ===")
-	licenseFile := "../../cmd/CreateLic/app.lic"
-	key := "1234567890123456"
+	licenseFile := "app.lic"  // 先用 licensemanager create 生成到当前目录
+	key := "your-16-byte-key" // v1模式的AES密钥（16/24/32字节）；新项目建议改用Ed25519签名API
 
 	info, err := LicenseManager.GetLicenseInfo(licenseFile, key)
 	if err != nil {

@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -15,13 +14,22 @@ import (
 	"github.com/xinjiayu/LicenseManager/utils"
 )
 
+var (
+	// ErrLicenseExpired 许可证已超过授权有效期
+	ErrLicenseExpired = errors.New("许可证已过期")
+	// ErrDeviceMismatch 许可证绑定的设备与当前设备不匹配
+	ErrDeviceMismatch = errors.New("许可证不适用于此设备")
+)
+
 type AppLicenseInfo struct {
-	AppName        string //应用名称
-	AppCompany     string //应用发布的公司
-	AppUUID        string //此次发布应用的UUID
-	ObjUUID        string //目标设备的UUID
-	AuthorizedName string //授权名称
-	LimitedTime    string //到期日期
+	AppName         string //应用名称
+	AppCompany      string //应用发布的公司
+	AppUUID         string //此次发布应用的UUID
+	ObjUUID         string //目标设备的UUID
+	AuthorizedName  string //授权名称
+	LimitedTime     string //到期日期
+	LicenseID       string //许可证ID（可选扩展字段）
+	LicenseQuantity int    //许可证数量（可选扩展字段）
 }
 
 // LicenseDisplayInfo 用于显示的许可证信息结构
@@ -34,74 +42,153 @@ type LicenseDisplayInfo struct {
 	LimitedTime     string `json:"limited_time"`     // 到期日期
 	LicenseID       string `json:"license_id"`       // 许可证ID（如果存在）
 	LicenseQuantity int    `json:"license_quantity"` // 许可证数量（如果存在）
-	EncryptSalt     string `json:"encrypt_salt"`     // 加密盐值（如果存在）
 	Status          string `json:"status"`           // 许可证状态：valid, expired, invalid
 	DaysRemaining   int    `json:"days_remaining"`   // 剩余天数
 	IsValid         bool   `json:"is_valid"`         // 是否有效
 	ErrorMessage    string `json:"error_message"`    // 错误信息（如果有）
 }
 
-// EncryptLic 根据应用信息的配置文件生成license授权文件
-func EncryptLic(appInfoFile, key string) {
-	// 从文件中读取配置
-	file, err := os.Open(appInfoFile) // 使用Open而不是OpenFile，更简洁
+// validateLicenseInfo 校验授权信息是否匹配当前设备与时间，v1/v2 许可证共用
+func validateLicenseInfo(conf *AppLicenseInfo) error {
+	// 获取本机的ID
+	id, err := machineid.ID()
 	if err != nil {
-		log.Fatalf("打开配置文件失败: %v", err)
+		return errors.New("获取本机ID失败")
 	}
+
+	// 验证设备UUID
+	if conf.ObjUUID != id {
+		return fmt.Errorf("%w: 授权对象UUID与本机UUID不一致", ErrDeviceMismatch)
+	}
+
+	// 验证到期时间（统一按UTC比较，避免跨时区部署时到期日判断出现偏差）
+	if conf.LimitedTime != "" {
+		// 用 time.Parse 严格校验日期合法性，拒绝 20261301 这类并不存在的日期
+		licTime, err := time.Parse("20060102", conf.LimitedTime)
+		if err != nil {
+			return errors.New("授权文件中的到期时间格式错误")
+		}
+
+		now := time.Now().UTC()
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+		if licTime.Before(today) {
+			return fmt.Errorf("%w！授权结束日期: %s, 当前日期: %s", ErrLicenseExpired, conf.LimitedTime, today.Format("20060102"))
+		}
+	}
+
+	// 检测系统时间回拨并记录本次验证时间
+	return checkClockAndRecord(conf)
+}
+
+// licenseStatusForError 根据校验错误映射显示状态
+func licenseStatusForError(err error) string {
+	if errors.Is(err, ErrLicenseExpired) {
+		return "expired"
+	}
+	return "invalid"
+}
+
+// daysRemaining 计算距到期时间的剩余天数（按UTC），永久许可证（未设置到期时间）返回 -1
+func daysRemaining(limitedTime string) int {
+	if limitedTime == "" {
+		return -1
+	}
+	licTime, err := time.Parse("20060102", limitedTime)
+	if err != nil {
+		return -1
+	}
+	return int(licTime.Sub(time.Now().UTC()).Hours() / 24)
+}
+
+// fillDisplayInfo 将授权信息填入显示结构
+func fillDisplayInfo(info *LicenseDisplayInfo, conf *AppLicenseInfo) {
+	info.AppName = conf.AppName
+	info.AppCompany = conf.AppCompany
+	info.AppUUID = conf.AppUUID
+	info.ObjUUID = conf.ObjUUID
+	info.AuthorizedName = conf.AuthorizedName
+	info.LimitedTime = conf.LimitedTime
+	info.LicenseID = conf.LicenseID
+	info.LicenseQuantity = conf.LicenseQuantity
+	info.DaysRemaining = daysRemaining(conf.LimitedTime)
+}
+
+// decryptLicense 解密 v1 许可证内容，将底层工具的panic转换为错误，
+// 避免密钥错误或文件损坏导致宿主程序崩溃。
+// 先按新格式（随机IV前缀）解密，失败再按旧格式（密钥作IV）解密，
+// 以"明文可解析为JSON"作为最终判据：CBC下错误的IV只会破坏第一个块、
+// 填充校验可能碰巧通过，只有密钥与格式都正确才能解出合法JSON。
+func decryptLicense(cipherText, key string) (text string, err error) {
 	defer func() {
-		if closeErr := file.Close(); closeErr != nil {
-			log.Printf("关闭文件失败: %v", closeErr)
+		if r := recover(); r != nil {
+			text = ""
+			err = fmt.Errorf("许可证解密失败，可能密钥错误或文件损坏: %v", r)
 		}
 	}()
 
-	// 使用io.ReadAll替代已废弃的ioutil.ReadAll
-	contentByte, err := io.ReadAll(file)
-	if err != nil {
-		log.Fatalf("读取配置文件失败: %v", err)
+	if plain, decryptErr := utils.AesDecryptPrefixIV(cipherText, key); decryptErr == nil && json.Valid([]byte(plain)) {
+		return plain, nil
 	}
+	if plain, decryptErr := utils.AesDecryptFixedIV(cipherText, key); decryptErr == nil && json.Valid([]byte(plain)) {
+		return plain, nil
+	}
+	return "", errors.New("许可证解密失败，可能密钥错误或文件损坏")
+}
 
-	// 验证JSON格式
+// EncryptLic 根据应用信息的配置文件生成license授权文件（固定输出 app.lic）。
+//
+// Deprecated: 该函数固定输出 app.lic，且失败时以 log.Fatal 终止进程，
+// 不适合在库代码中使用。请改用 EncryptLicToFile（可自定义输出路径并返回 error）。
+// 对于新签发的许可证，建议使用 Ed25519 签名格式 EncryptLicSigned。
+func EncryptLic(appInfoFile, key string) {
+	contentByte, err := os.ReadFile(appInfoFile)
+	if err != nil {
+		log.Fatalf("打开配置文件失败: %v", err)
+	}
 	var conf AppLicenseInfo
 	if err := json.Unmarshal(contentByte, &conf); err != nil {
 		log.Fatalf("解析配置文件失败，请检查JSON格式: %v", err)
-	}
-
-	// 验证必要字段
-	if conf.AppName == "" {
-		log.Fatal("配置文件中AppName字段不能为空")
-	}
-	if conf.ObjUUID == "" {
-		log.Fatal("配置文件中ObjUUID字段不能为空")
 	}
 
 	log.Printf("应用名称: %s", conf.AppName)
 	log.Printf("目标设备UUID: %s", conf.ObjUUID)
 	log.Printf("授权到期时间: %s", conf.LimitedTime)
 
-	// 进行加密
-	tmpText := string(contentByte)
-	encryptedText := utils.AesEncrypt(tmpText, key)
-
-	// 生成license授权文件
-	licFilePath := "app.lic"
-	dstFile, err := os.Create(licFilePath)
-	if err != nil {
-		log.Fatalf("创建授权文件失败: %v", err)
+	if err := EncryptLicToFile(appInfoFile, "app.lic", key); err != nil {
+		log.Fatal(err)
 	}
-	defer func() {
-		if closeErr := dstFile.Close(); closeErr != nil {
-			log.Printf("关闭授权文件失败: %v", closeErr)
-		}
-	}()
-
-	if _, err := dstFile.WriteString(encryptedText); err != nil {
-		log.Fatalf("写入授权文件失败: %v", err)
-	}
-
-	log.Printf("授权文件已生成: %s", licFilePath)
+	log.Printf("授权文件已生成: %s", "app.lic")
 }
 
-// ValidAppLic 验证应用许可证
+// EncryptLicToFile 根据应用信息的配置文件生成license授权文件，输出到指定路径
+func EncryptLicToFile(appInfoFile, output, key string) error {
+	contentByte, err := os.ReadFile(appInfoFile)
+	if err != nil {
+		return fmt.Errorf("打开配置文件失败: %w", err)
+	}
+
+	// 验证JSON格式与必要字段
+	var conf AppLicenseInfo
+	if err := json.Unmarshal(contentByte, &conf); err != nil {
+		return fmt.Errorf("解析配置文件失败，请检查JSON格式: %w", err)
+	}
+	if conf.AppName == "" {
+		return errors.New("配置文件中AppName字段不能为空")
+	}
+	if conf.ObjUUID == "" {
+		return errors.New("配置文件中ObjUUID字段不能为空")
+	}
+
+	// 进行加密
+	encryptedText := utils.AesEncrypt(string(contentByte), key)
+
+	if err := os.WriteFile(output, []byte(encryptedText), 0644); err != nil {
+		return fmt.Errorf("写入授权文件失败: %w", err)
+	}
+	return nil
+}
+
+// ValidAppLic 验证应用许可证（v1 AES对称加密格式）
 func ValidAppLic(appInfoFile, key string) (res bool, err error) {
 	// 安全地打开文件
 	file, err := os.Open(appInfoFile)
@@ -113,7 +200,7 @@ func ValidAppLic(appInfoFile, key string) (res bool, err error) {
 	}
 	defer func() {
 		if closeErr := file.Close(); closeErr != nil {
-			log.Printf("关闭授权文件失败: %v", closeErr)
+			log.Printf("关闭文件失败: %v", closeErr)
 		}
 	}()
 
@@ -128,9 +215,11 @@ func ValidAppLic(appInfoFile, key string) (res bool, err error) {
 		return false, errors.New("授权文件为空")
 	}
 
-	// 进行解密
-	tmpText := string(contentByte)
-	decryptedText := utils.AesDecrypt(tmpText, key)
+	// 进行解密，失败时返回错误而不是panic
+	decryptedText, err := decryptLicense(string(contentByte), key)
+	if err != nil {
+		return false, err
+	}
 
 	// 解析JSON
 	var conf AppLicenseInfo
@@ -138,41 +227,13 @@ func ValidAppLic(appInfoFile, key string) (res bool, err error) {
 		return false, errors.New("授权文件格式错误或解密失败")
 	}
 
-	// 获取本机的ID
-	id, err := machineid.ID()
-	if err != nil {
-		return false, errors.New("获取本机ID失败")
+	if err := validateLicenseInfo(&conf); err != nil {
+		return false, err
 	}
-
-	// 验证设备UUID
-	if conf.ObjUUID != id {
-		return false, errors.New("授权文件不适用于此设备")
-	}
-
-	// 验证到期时间
-	limitedTime := conf.LimitedTime
-	if limitedTime != "" {
-		licDate, err := strconv.Atoi(limitedTime)
-		if err != nil {
-			return false, errors.New("授权文件中的到期时间格式错误")
-		}
-
-		nowDate := time.Now().Format("20060102")
-		currentDate, err := strconv.Atoi(nowDate)
-		if err != nil {
-			return false, errors.New("系统时间格式错误")
-		}
-
-		if licDate < currentDate {
-			errInfo := fmt.Sprintf("授权文件已过期！授权结束日期: %d, 当前日期: %d", licDate, currentDate)
-			return false, errors.New(errInfo)
-		}
-	}
-
 	return true, nil
 }
 
-// GetLicenseInfo 获取许可证文件的详细信息，用于界面显示
+// GetLicenseInfo 获取许可证文件的详细信息，用于界面显示（v1 AES对称加密格式）
 func GetLicenseInfo(licenseFile, key string) (*LicenseDisplayInfo, error) {
 	// 初始化返回结构
 	info := &LicenseDisplayInfo{
@@ -210,21 +271,10 @@ func GetLicenseInfo(licenseFile, key string) (*LicenseDisplayInfo, error) {
 		return info, nil
 	}
 
-	// 尝试解密
-	tmpText := string(contentByte)
-	var decryptedText string
-
-	// 使用recover来捕获解密过程中的panic
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				info.ErrorMessage = "许可证文件解密失败，可能密钥错误或文件损坏"
-			}
-		}()
-		decryptedText = utils.AesDecrypt(tmpText, key)
-	}()
-
-	if info.ErrorMessage != "" {
+	// 解密，失败时返回错误而不是panic
+	decryptedText, err := decryptLicense(string(contentByte), key)
+	if err != nil {
+		info.ErrorMessage = "许可证文件解密失败，可能密钥错误或文件损坏"
 		return info, nil
 	}
 
@@ -236,71 +286,12 @@ func GetLicenseInfo(licenseFile, key string) (*LicenseDisplayInfo, error) {
 	}
 
 	// 填充基本信息
-	info.AppName = conf.AppName
-	info.AppCompany = conf.AppCompany
-	info.AppUUID = conf.AppUUID
-	info.ObjUUID = conf.ObjUUID
-	info.AuthorizedName = conf.AuthorizedName
-	info.LimitedTime = conf.LimitedTime
+	fillDisplayInfo(info, &conf)
 
-	// 尝试解析额外字段（可能存在于JSON中但不在AppLicenseInfo结构中）
-	var extraData map[string]interface{}
-	if err := json.Unmarshal([]byte(decryptedText), &extraData); err == nil {
-		if licenseID, ok := extraData["LicenseID"].(string); ok {
-			info.LicenseID = licenseID
-		}
-		if quantity, ok := extraData["LicenseQuantity"].(float64); ok {
-			info.LicenseQuantity = int(quantity)
-		}
-		if salt, ok := extraData["EncryptSalt"].(string); ok {
-			info.EncryptSalt = salt
-		}
-	}
-
-	// 验证设备UUID
-	id, err := machineid.ID()
-	if err != nil {
-		info.ErrorMessage = "获取本机ID失败"
+	if err := validateLicenseInfo(&conf); err != nil {
+		info.Status = licenseStatusForError(err)
+		info.ErrorMessage = err.Error()
 		return info, nil
-	}
-
-	if conf.ObjUUID != id {
-		info.Status = "invalid"
-		info.ErrorMessage = "许可证文件不适用于此设备"
-		return info, nil
-	}
-
-	// 验证到期时间
-	if conf.LimitedTime != "" {
-		licDate, err := strconv.Atoi(conf.LimitedTime)
-		if err != nil {
-			info.ErrorMessage = "许可证文件中的到期时间格式错误"
-			return info, nil
-		}
-
-		nowDate := time.Now().Format("20060102")
-		currentDate, err := strconv.Atoi(nowDate)
-		if err != nil {
-			info.ErrorMessage = "系统时间格式错误"
-			return info, nil
-		}
-
-		// 计算剩余天数
-		licTime, err := time.Parse("20060102", conf.LimitedTime)
-		if err == nil {
-			now := time.Now()
-			diff := licTime.Sub(now)
-			info.DaysRemaining = int(diff.Hours() / 24)
-		}
-
-		if licDate < currentDate {
-			info.Status = "expired"
-			info.ErrorMessage = fmt.Sprintf("许可证已过期！到期日期: %s, 当前日期: %s", conf.LimitedTime, nowDate)
-			return info, nil
-		}
-	} else {
-		// 如果没有设置到期时间，认为是永久许可证
-		info.DaysRemaining = -1 // -1 表示永久
 	}
 
 	// 如果到这里，说明许可证有效
@@ -311,13 +302,17 @@ func GetLicenseInfo(licenseFile, key string) (*LicenseDisplayInfo, error) {
 	return info, nil
 }
 
-// GetLicenseInfoFormatted 获取格式化的许可证信息字符串，用于直接显示
+// GetLicenseInfoFormatted 获取格式化的许可证信息字符串，用于直接显示（v1 AES对称加密格式）
 func GetLicenseInfoFormatted(licenseFile, key string) (string, error) {
 	info, err := GetLicenseInfo(licenseFile, key)
 	if err != nil {
 		return "", err
 	}
+	return formatLicenseInfo(info), nil
+}
 
+// formatLicenseInfo 将许可证信息渲染为多行文本
+func formatLicenseInfo(info *LicenseDisplayInfo) string {
 	var result strings.Builder
 	result.WriteString("=== 许可证信息 ===\n")
 	result.WriteString(fmt.Sprintf("应用名称: %s\n", info.AppName))
@@ -347,7 +342,7 @@ func GetLicenseInfoFormatted(licenseFile, key string) (string, error) {
 	}
 
 	// 状态信息
-	result.WriteString(fmt.Sprintf("许可证状态: "))
+	result.WriteString("许可证状态: ")
 	switch info.Status {
 	case "valid":
 		result.WriteString("✅ 有效\n")
@@ -361,5 +356,5 @@ func GetLicenseInfoFormatted(licenseFile, key string) (string, error) {
 		result.WriteString(fmt.Sprintf("错误信息: %s\n", info.ErrorMessage))
 	}
 
-	return result.String(), nil
+	return result.String()
 }
