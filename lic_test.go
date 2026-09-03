@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/denisbrodbeck/machineid"
+	"github.com/xinjiayu/LicenseManager/utils"
 )
 
 const testAESKey = "1234567890123456"
@@ -130,16 +132,24 @@ func TestValidAppLicCorruptedFile(t *testing.T) {
 	}
 }
 
-// TestValidAppLicInvalidDate 到期时间为非法日期（如不存在的13月）时应报格式错误，
-// 而不是被当作有效或永久许可证
+// TestValidAppLicInvalidDate 到期时间为非法日期（如不存在的13月）时，
+// 签发端与验证端都应拒绝，而不是被当作有效或永久许可证
 func TestValidAppLicInvalidDate(t *testing.T) {
 	uuid := machineUUIDForTest(t)
 	dir := t.TempDir()
 	config := writeTestConfig(t, uuid, "20261301")
-	licFile := filepath.Join(dir, "bad-date.lic")
 
-	if err := EncryptLicToFile(config, licFile, testAESKey); err != nil {
-		t.Fatalf("生成许可证失败: %v", err)
+	// 签发端：格式校验前移，直接拒绝
+	err := EncryptLicToFile(config, filepath.Join(dir, "bad-date.lic"), testAESKey)
+	if err == nil || !strings.Contains(err.Error(), "到期时间格式错误") {
+		t.Fatalf("非法到期日期在签发时就应被拒绝，实际: %v", err)
+	}
+
+	// 验证端：手工构造含非法日期的v1许可证（绕过签发校验），验证同样拒绝
+	payload := fmt.Sprintf(`{"AppName":"TestApp","ObjUUID":%q,"LimitedTime":"20261301"}`, uuid)
+	licFile := filepath.Join(dir, "handmade.lic")
+	if err := os.WriteFile(licFile, []byte(utils.AesEncrypt(payload, testAESKey)), 0644); err != nil {
+		t.Fatalf("写入测试许可证失败: %v", err)
 	}
 
 	ok, err := ValidAppLic(licFile, testAESKey)

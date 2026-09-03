@@ -30,6 +30,8 @@ var (
 	ErrInvalidSignature = errors.New("许可证签名验证失败，文件可能被篡改")
 	// ErrUnsupportedLicense 许可证算法或版本不受支持
 	ErrUnsupportedLicense = errors.New("许可证算法或版本不受支持")
+	// ErrUniversalRequiresExpiry 通用许可证缺少到期时间（禁止签发永久通用许可证）
+	ErrUniversalRequiresExpiry = errors.New("通用许可证必须设置到期时间")
 )
 
 // licenseEnvelope v2 许可证文件结构。payload 为 base64 编码的授权信息 JSON 原始字节，
@@ -102,6 +104,22 @@ func parseSigningPublicKey(publicPEM string) (ed25519.PublicKey, error) {
 // EncryptLicSigned 读取 JSON 授权配置文件，用 Ed25519 私钥对其签名并生成 v2 许可证文件。
 // 签名覆盖配置文件的原始字节，验证端以文件内嵌的 payload 为准，不依赖重新序列化。
 func EncryptLicSigned(appInfoFile, output, privateKeyPEM string) error {
+	return signLicenseToFile(appInfoFile, output, privateKeyPEM, false)
+}
+
+// EncryptLicSignedUniversal 签发通用许可证（ObjUUID 留空 = 不绑定设备，任何机器可验签）。
+// 通用许可证不绑定设备、一旦外泄即全网可用，因此禁止签发永久通用许可证：
+// LimitedTime 必填，到期后必须重新签发。调用方可在其之上叠加更严格的产品规则
+// （如有效期上限），本库只保证「通用必有过期时间」这一安全底线。
+// 通用许可证不做设备绑定判定，验证侧请配合 ParseSignedLicenseFile/Content
+// 实现自定义校验；通过 ValidAppLicSigned 验证会因 ErrDeviceMismatch 被拒绝。
+func EncryptLicSignedUniversal(appInfoFile, output, privateKeyPEM string) error {
+	return signLicenseToFile(appInfoFile, output, privateKeyPEM, true)
+}
+
+// signLicenseToFile 签发 v2 许可证的共用实现。
+// universal 为 true 时允许 ObjUUID 留空（通用许可证），但要求 LimitedTime 必填。
+func signLicenseToFile(appInfoFile, output, privateKeyPEM string, universal bool) error {
 	content, err := os.ReadFile(appInfoFile)
 	if err != nil {
 		return fmt.Errorf("打开配置文件失败: %w", err)
@@ -114,8 +132,19 @@ func EncryptLicSigned(appInfoFile, output, privateKeyPEM string) error {
 	if conf.AppName == "" {
 		return errors.New("配置文件中AppName字段不能为空")
 	}
-	if conf.ObjUUID == "" {
+	if universal && conf.ObjUUID != "" {
+		return errors.New("通用许可证的ObjUUID必须留空（如需绑定设备请使用EncryptLicSigned）")
+	}
+	if !universal && conf.ObjUUID == "" {
 		return errors.New("配置文件中ObjUUID字段不能为空")
+	}
+	if universal && conf.LimitedTime == "" {
+		return fmt.Errorf("%w（LimitedTime），禁止签发永久通用许可证", ErrUniversalRequiresExpiry)
+	}
+	if conf.LimitedTime != "" {
+		if _, err := time.Parse("20060102", conf.LimitedTime); err != nil {
+			return fmt.Errorf("到期时间格式错误，应为YYYYMMDD: %w", err)
+		}
 	}
 
 	priv, err := parseSigningPrivateKey(privateKeyPEM)
@@ -144,15 +173,10 @@ func EncryptLicSigned(appInfoFile, output, privateKeyPEM string) error {
 	return nil
 }
 
-// verifySignedLicense 读取 v2 许可证文件并完成签名验证，返回其中的授权信息
-func verifySignedLicense(licFile, publicKeyPEM string) (*AppLicenseInfo, error) {
-	content, err := os.ReadFile(licFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, errors.New("授权文件不存在")
-		}
-		return nil, fmt.Errorf("打开授权文件失败: %w", err)
-	}
+// ParseSignedLicenseContent 验签并解析 v2 许可证内容（[]byte），
+// 不做设备/到期/回拨判定——供调用方实现自定义分级校验
+// （如通用授权跳过设备绑定、内嵌字符串授权等场景）。
+func ParseSignedLicenseContent(content []byte, publicKeyPEM string) (*AppLicenseInfo, error) {
 	if len(content) == 0 {
 		return nil, errors.New("授权文件为空")
 	}
@@ -192,9 +216,22 @@ func verifySignedLicense(licFile, publicKeyPEM string) (*AppLicenseInfo, error) 
 	return &conf, nil
 }
 
+// ParseSignedLicenseFile 验签并解析 v2 许可证文件，
+// 不做设备/到期/回拨判定，用途同 ParseSignedLicenseContent。
+func ParseSignedLicenseFile(licFile, publicKeyPEM string) (*AppLicenseInfo, error) {
+	content, err := os.ReadFile(licFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, errors.New("授权文件不存在")
+		}
+		return nil, fmt.Errorf("打开授权文件失败: %w", err)
+	}
+	return ParseSignedLicenseContent(content, publicKeyPEM)
+}
+
 // ValidAppLicSigned 验证 v2 签名许可证：先验签，再校验设备UUID与到期时间。
 func ValidAppLicSigned(licFile, publicKeyPEM string) (bool, error) {
-	conf, err := verifySignedLicense(licFile, publicKeyPEM)
+	conf, err := ParseSignedLicenseFile(licFile, publicKeyPEM)
 	if err != nil {
 		return false, err
 	}
@@ -213,7 +250,7 @@ func GetLicenseInfoSigned(licFile, publicKeyPEM string) (*LicenseDisplayInfo, er
 		DaysRemaining: -1,
 	}
 
-	conf, err := verifySignedLicense(licFile, publicKeyPEM)
+	conf, err := ParseSignedLicenseFile(licFile, publicKeyPEM)
 	if err != nil {
 		info.ErrorMessage = err.Error()
 		return info, nil

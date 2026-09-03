@@ -26,8 +26,17 @@ const (
 // ErrClockRollback 检测到系统时间相对上次验证记录明显回拨
 var ErrClockRollback = errors.New("检测到系统时间回拨，请校正系统时间后重试")
 
-// clockStateFilePath 防回拨状态文件路径，空字符串表示禁用该机制；测试中可替换
+// clockStateFilePath 防回拨状态文件路径，空字符串表示禁用该机制；
+// 外部通过 SetClockStatePath 修改，测试中可直接替换包内变量
 var clockStateFilePath = defaultClockStateFilePath()
+
+// SetClockStatePath 设置防回拨状态文件路径。
+// 须在任何许可证验证之前调用（进程初始化期设置一次）；非并发安全。
+// 典型场景：容器部署（HOME 可能缺失导致默认路径为空、防护静默禁用）时
+// 将状态文件指向持久卷；传空字符串为显式禁用回拨防护。
+func SetClockStatePath(path string) {
+	clockStateFilePath = path
+}
 
 func defaultClockStateFilePath() string {
 	home, err := os.UserHomeDir()

@@ -160,6 +160,7 @@ func createCommand(args []string) {
 		configFile = fs.String("f", "", "需要授权的应用信息配置文件，json格式")
 		key        = fs.String("k", "", "v1模式的AES授权密钥，16/24/32字节（已不推荐，建议改用-privkey）")
 		privateKey = fs.String("privkey", "", "Ed25519私钥PEM文件路径，指定后生成v2签名格式许可证（推荐）")
+		universal  = fs.Bool("universal", false, "签发通用许可证（不绑定设备，须与-privkey组合，且LimitedTime必填）")
 		output     = fs.String("o", "app.lic", "输出的许可证文件名")
 		help       = fs.Bool("h", false, "查看帮助信息")
 	)
@@ -177,6 +178,9 @@ Examples:
   # v2 Ed25519签名格式（推荐，客户端只需公钥即可验证）
   licensemanager create -f config.json -privkey license_private_key.pem -o app.lic
 
+  # v2 通用许可证（不绑定设备，禁止永久，LimitedTime必填）
+  licensemanager create -f config.json -privkey license_private_key.pem -universal -o trial.lic
+
   # v1 AES加密格式（不推荐，仅兼容旧版本客户端）
   licensemanager create -f config.json -k "your-16-byte-key" -o app.lic
 `)
@@ -192,6 +196,9 @@ Examples:
 	if *configFile == "" {
 		fatalf("必须指定配置文件 (-f)")
 	}
+	if *universal && *privateKey == "" {
+		fatalf("-universal 仅支持与 -privkey 组合使用（通用许可证只存在于v2签名格式）")
+	}
 
 	fmt.Printf("使用配置文件: %s\n", *configFile)
 	fmt.Printf("输出文件: %s\n", *output)
@@ -206,9 +213,16 @@ Examples:
 			fatalf("%v", err)
 		}
 
-		fmt.Printf("签名模式: Ed25519 (v2)\n")
-		if err := LicenseManager.EncryptLicSigned(*configFile, *output, privatePEM); err != nil {
-			fatalf("创建许可证失败: %v", err)
+		if *universal {
+			fmt.Printf("签名模式: Ed25519 (v2, 通用许可证)\n")
+			if err := LicenseManager.EncryptLicSignedUniversal(*configFile, *output, privatePEM); err != nil {
+				fatalf("创建许可证失败: %v", err)
+			}
+		} else {
+			fmt.Printf("签名模式: Ed25519 (v2)\n")
+			if err := LicenseManager.EncryptLicSigned(*configFile, *output, privatePEM); err != nil {
+				fatalf("创建许可证失败: %v", err)
+			}
 		}
 		fmt.Println("✅ 许可证文件生成成功！")
 		return

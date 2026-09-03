@@ -105,3 +105,40 @@ func TestClockStateCorruptFailOpen(t *testing.T) {
 		t.Fatalf("状态损坏时验证应正常通过: ok=%v err=%v", ok, err)
 	}
 }
+
+// TestSetClockStatePath 验证导出的状态文件路径设置：自定义路径生效、空串显式禁用
+func TestSetClockStatePath(t *testing.T) {
+	uuid := machineUUIDForTest(t)
+	privatePEM, publicPEM := signTestKeys(t)
+
+	dir := t.TempDir()
+	config := writeTestConfig(t, uuid, futureDate())
+	licFile := filepath.Join(dir, "signed.lic")
+	if err := EncryptLicSigned(config, licFile, privatePEM); err != nil {
+		t.Fatalf("生成签名许可证失败: %v", err)
+	}
+
+	// 保存旧值恢复，避免将来t.Parallel()或调整顺序时掩盖真实旧值
+	oldPath := clockStateFilePath
+	t.Cleanup(func() { SetClockStatePath(oldPath) })
+
+	// 自定义路径：验证后状态文件应落在该路径（目录不存在时自动创建）
+	customPath := filepath.Join(t.TempDir(), "persist-volume", "clock_state.json")
+	SetClockStatePath(customPath)
+	if ok, err := ValidAppLicSigned(licFile, publicPEM); err != nil || !ok {
+		t.Fatalf("自定义路径下验证应通过: ok=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(customPath); err != nil {
+		t.Fatalf("状态文件应写入指定路径 %s: %v", customPath, err)
+	}
+
+	// 空串 = 显式禁用：不写状态文件，验证不受影响
+	disabledPath := filepath.Join(t.TempDir(), "should-not-exist", "clock_state.json")
+	SetClockStatePath("")
+	if ok, err := ValidAppLicSigned(licFile, publicPEM); err != nil || !ok {
+		t.Fatalf("禁用回拨防护后验证应正常: ok=%v err=%v", ok, err)
+	}
+	if _, err := os.Stat(disabledPath); !os.IsNotExist(err) {
+		t.Fatalf("禁用后不应产生状态文件")
+	}
+}

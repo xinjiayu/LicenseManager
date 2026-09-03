@@ -83,6 +83,12 @@ v1 使用 AES 对称加密：客户端要验证许可证就必须内嵌解密密
 - 公钥（`license_public_key.pem`）：内嵌到客户端程序（硬编码常量或随二进制分发）
 - 密钥遗失/泄露时的处理：换新密钥对重新签发，客户端升级时更新内嵌公钥
 
+### 通用许可证与自定义分级校验
+
+- **通用许可证**（不绑定设备，适合内嵌试用授权、批量延期）：签发用 `EncryptLicSignedUniversal` 或 CLI `create -universal`（须与 `-privkey` 组合）。库层安全底线：禁止签发永久通用许可证，LimitedTime 必填；有效期上限等产品规则由接入方自行叠加。
+- **仅验签解析**：`ParseSignedLicenseFile`（文件）/ `ParseSignedLicenseContent`（字节，适配 `-ldflags` 内嵌授权）只做 Ed25519 验签与内容解析，不做设备/到期/回拨判定，供接入方实现自定义分级（如通用授权跳过设备绑定）。
+- **回拨状态路径**：`SetClockStatePath(path)` 在进程初始化期设置防回拨状态文件路径（容器部署建议指向持久卷；传空串显式禁用该机制）。
+
 ### Go API（v2 签名许可证）
 
 ```go
@@ -348,8 +354,9 @@ go build -o licensemanager ./cmd/licensemanager
 1. **API兼容**：原有函数保持不变；`EncryptLic` 已标记 Deprecated，请改用 `EncryptLicToFile`
 2. **文件兼容**：v1许可证文件（含旧格式固定IV）仍可验证；`LicenseDisplayInfo` 移除了内部字段 `EncryptSalt`，`LicenseID`/`LicenseQuantity` 已正式收进 `AppLicenseInfo`
 3. **CLI变化**：`-k` 不再有默认弱密钥，必须显式传入；错误信息统一输出到 stderr；`genkeys` 默认拒绝覆盖已存在的密钥文件（需 `-force` 确认）
-4. **错误判定**：验证失败的错误文案有调整（如"授权文件不适用于此设备"改为由 `ErrDeviceMismatch` 包装的新文案）；请勿对错误做字符串匹配，改用 `errors.Is` 判定哨兵错误（`ErrLicenseExpired`/`ErrDeviceMismatch`/`ErrInvalidSignature`/`ErrClockRollback` 等）
-5. **推荐迁移**：新签发许可证一律使用 v2 Ed25519 签名格式（`genkeys` + `-privkey`/`-pubkey`），客户端只需内嵌公钥
+4. **错误判定**：验证失败的错误文案有调整（如"授权文件不适用于此设备"改为由 `ErrDeviceMismatch` 包装的新文案）；请勿对错误做字符串匹配，改用 `errors.Is` 判定哨兵错误（`ErrLicenseExpired`/`ErrDeviceMismatch`/`ErrInvalidSignature`/`ErrClockRollback`/`ErrUniversalRequiresExpiry` 等）
+5. **行为变更提示**：v1/v2 签发入口（`EncryptLicToFile`/`EncryptLicSigned`/`EncryptLicSignedUniversal`）现要求 `LimitedTime` 非空时必须为合法 `YYYYMMDD` 日期（此前允许任意非空字符串）。验证端早已按此标准拒绝，该变更只把必然无效的签发拦在源头；存量调用方如传入过非法日期格式，会在签发时收到明确报错
+6. **推荐迁移**：新签发许可证一律使用 v2 Ed25519 签名格式（`genkeys` + `-privkey`/`-pubkey`），客户端只需内嵌公钥
 
 ### 从v1.0.x分散工具升级
 

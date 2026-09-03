@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/denisbrodbeck/machineid"
@@ -20,6 +21,32 @@ var (
 	// ErrDeviceMismatch 许可证绑定的设备与当前设备不匹配
 	ErrDeviceMismatch = errors.New("许可证不适用于此设备")
 )
+
+// 机器码在运行期不会合法变化，而部分平台（如macOS的ioreg子进程）每次获取
+// 开销不小，验证又可能高频触发，因此成功获取一次后全程缓存。
+// 失败不缓存（获取失败可能是子进程偶发超时等瞬时原因），下次验证会重试。
+var (
+	machineUUIDMu     sync.Mutex
+	machineUUID       string
+	machineUUIDCached bool
+)
+
+// cachedMachineUUID 返回缓存的本机机器码，未缓存或上次失败时重新获取
+func cachedMachineUUID() (string, error) {
+	machineUUIDMu.Lock()
+	defer machineUUIDMu.Unlock()
+
+	if machineUUIDCached {
+		return machineUUID, nil
+	}
+
+	id, err := machineid.ID()
+	if err != nil {
+		return "", err
+	}
+	machineUUID, machineUUIDCached = id, true
+	return id, nil
+}
 
 type AppLicenseInfo struct {
 	AppName         string //应用名称
@@ -50,8 +77,8 @@ type LicenseDisplayInfo struct {
 
 // validateLicenseInfo 校验授权信息是否匹配当前设备与时间，v1/v2 许可证共用
 func validateLicenseInfo(conf *AppLicenseInfo) error {
-	// 获取本机的ID
-	id, err := machineid.ID()
+	// 获取本机的ID（运行期缓存，见 cachedMachineUUID）
+	id, err := cachedMachineUUID()
 	if err != nil {
 		return errors.New("获取本机ID失败")
 	}
@@ -177,6 +204,13 @@ func EncryptLicToFile(appInfoFile, output, key string) error {
 	}
 	if conf.ObjUUID == "" {
 		return errors.New("配置文件中ObjUUID字段不能为空")
+	}
+	// 与验证端validateLicenseInfo一致：到期时间非空时必须是合法YYYYMMDD，
+	// 避免签出验证端必然拒绝的许可证
+	if conf.LimitedTime != "" {
+		if _, err := time.Parse("20060102", conf.LimitedTime); err != nil {
+			return fmt.Errorf("到期时间格式错误，应为YYYYMMDD: %w", err)
+		}
 	}
 
 	// 进行加密

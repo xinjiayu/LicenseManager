@@ -4,3 +4,10 @@
 
 # 编译产物
 /licensemanager
+
+# IDE
+.idea/
+
+# Agent工具状态目录
+.agent-proof/
+.codewhale/

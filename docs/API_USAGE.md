@@ -9,12 +9,22 @@ v2 许可证使用 Ed25519 非对称签名：签发方持有私钥，客户端�
 | 函数 | 用途 |
 |------|------|
 | `GenerateSigningKeyPair() (privatePEM, publicPEM string, err error)` | 生成 Ed25519 密钥对（PKCS#8/PKIX PEM） |
-| `EncryptLicSigned(appInfoFile, output, privateKeyPEM string) error` | 读取配置 JSON，签名并生成 v2 许可证 |
-| `ValidAppLicSigned(licFile, publicKeyPEM string) (bool, error)` | 验证 v2 许可证（验签 + 设备 + 到期） |
+| `EncryptLicSigned(appInfoFile, output, privateKeyPEM string) error` | 读取配置 JSON，签名并生成 v2 许可证（设备绑定，ObjUUID 必填） |
+| `EncryptLicSignedUniversal(appInfoFile, output, privateKeyPEM string) error` | 签发通用许可证（ObjUUID 留空 = 不绑定设备；LimitedTime 必填，禁止永久通用许可证） |
+| `ValidAppLicSigned(licFile, publicKeyPEM string) (bool, error)` | 验证 v2 许可证（验签 + 设备 + 到期 + 回拨） |
+| `ParseSignedLicenseFile(licFile, publicKeyPEM string) (*AppLicenseInfo, error)` | 仅验签并解析 v2 许可证文件，不做设备/到期/回拨判定（自定义分级用） |
+| `ParseSignedLicenseContent(content []byte, publicKeyPEM string) (*AppLicenseInfo, error)` | 同上，输入为内容字节（适配 `-ldflags` 内嵌授权等不落文件场景） |
 | `GetLicenseInfoSigned(licFile, publicKeyPEM string) (*LicenseDisplayInfo, error)` | 获取 v2 许可证详细信息 |
 | `GetLicenseInfoSignedFormatted(licFile, publicKeyPEM string) (string, error)` | 获取 v2 许可证的格式化文本 |
+| `SetClockStatePath(path string)` | 设置防回拨状态文件路径（进程初始化期调用一次；空串 = 显式禁用；容器部署指向持久卷） |
 
-错误判定支持 `errors.Is`：`ErrInvalidSignature`（篡改/公钥不匹配）、`ErrLicenseExpired`（已过期）、`ErrDeviceMismatch`（设备不匹配）、`ErrClockRollback`（系统时间被回拨）。
+错误判定支持 `errors.Is`：`ErrInvalidSignature`（篡改/公钥不匹配）、`ErrLicenseExpired`（已过期）、`ErrDeviceMismatch`（设备不匹配）、`ErrClockRollback`（系统时间被回拨）、`ErrUniversalRequiresExpiry`（通用许可证缺少到期时间，签发侧）。
+
+### 通用许可证说明
+
+- 通用许可证（`EncryptLicSignedUniversal` / CLI `create -universal`，须与 `-privkey` 组合）不绑定设备，任何机器可验签，适合内嵌试用授权、批量延期等场景。
+- 库层安全底线：**ObjUUID 必须留空**（非空直接报错，需绑定设备请用 `EncryptLicSigned`）；**禁止签发永久通用许可证**（LimitedTime 必填且须为合法 YYYYMMDD，缺失时报 `ErrUniversalRequiresExpiry`）；有效期上限等产品规则由调用方自行叠加。
+- 通用许可证会因设备绑定校验被 `ValidAppLicSigned` 拒绝（`ErrDeviceMismatch`），调用方应使用 `ParseSignedLicenseFile/Content` 验签后自行执行分级校验（到期判断等）。
 
 ### 使用示例（客户端验证）
 
